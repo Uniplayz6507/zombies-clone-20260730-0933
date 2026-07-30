@@ -4,15 +4,15 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 /**
  * Geometry toolkit.
  *
- * Everything here builds geometry directly in *world* space and then hands it to
- * a `GeoCollector` keyed by material. At the end of construction each material's
- * chunks are merged into a single BufferGeometry, so the whole city - walls,
- * pavements, cars, pipes, crates, railings - collapses to roughly one draw call
- * per material instead of one per object.
+ * Everything here builds geometry directly in *world* space and hands it to a
+ * `GeoCollector` keyed by material. At the end of construction each material's
+ * chunks merge into a single BufferGeometry, so the whole city - walls, pavements,
+ * cars, pipes, crates, railings - collapses to roughly one draw call per material
+ * instead of one per object.
  *
  * That single decision is worth more than every other optimisation in this file:
- * on a weak CPU, ANGLE costs ~30-60us per draw call, so 800 objects would burn
- * the entire frame budget before the GPU did any work.
+ * on a weak CPU, ANGLE costs ~30-60us per draw call, so 800 separate objects would
+ * burn the entire frame budget before the GPU did any work at all.
  */
 
 /**
@@ -39,7 +39,7 @@ export function boxUV(geo: THREE.BufferGeometry, tile: number): THREE.BufferGeom
     let u: number;
     let v: number;
     if (ny >= nx && ny >= nz) {
-      // Floor / ceiling: project down.
+      // Floor or ceiling: project straight down.
       u = x * inv;
       v = z * inv;
     } else if (nx >= nz) {
@@ -83,6 +83,7 @@ export interface Xform {
   rz?: number;
 }
 
+/** Rotate about the local origin, then translate. Order matters. */
 function place(geo: THREE.BufferGeometry, t: Xform): THREE.BufferGeometry {
   if (t.rx) geo.rotateX(t.rx);
   if (t.ry) geo.rotateY(t.ry);
@@ -103,20 +104,22 @@ export function box(w: number, h: number, d: number, t: Xform = {}): THREE.Buffe
   return place(new THREE.BoxGeometry(w, h, d), t);
 }
 
-/** Bevelled box. Chamfered edges catch specular highlights, which is most of
- *  what separates a "3D box" from a manufactured object. */
+/**
+ * Bevelled box: a body with inset chamfer caps on the top and bottom faces.
+ *
+ * Chamfered edges catch specular highlights, and that is most of what separates a
+ * "3D box" from a manufactured object under a moving light.
+ */
 export function bevelBox(w: number, h: number, d: number, bevel: number, t: Xform = {}): THREE.BufferGeometry {
   const b = Math.min(bevel, w / 3, h / 3, d / 3);
-  const parts: THREE.BufferGeometry[] = [
-    new THREE.BoxGeometry(w, h - b * 2, d),
-    new THREE.BoxGeometry(w - b * 2, b, d - b * 2).translate(0, (h - b) / 2 + b / 2 - b / 2, 0),
-    new THREE.BoxGeometry(w - b * 2, b, d - b * 2).translate(0, -((h - b) / 2 + b / 2 - b / 2), 0),
-  ];
-  parts[1].translate(0, (h - b * 2) / 2 + b / 2, 0);
-  parts[2].translate(0, -((h - b * 2) / 2 + b / 2), 0);
-  const merged = mergeGeometries(parts.map(normaliseAttributes), false) ?? parts[0];
-  parts.forEach((p) => p.dispose());
-  return place(merged, t);
+  const body = new THREE.BoxGeometry(w, h - b * 2, d);
+  // Caps span from (h/2 - b) to h/2, so their centre is at (h - b) / 2.
+  const top = new THREE.BoxGeometry(w - b * 2, b, d - b * 2).translate(0, (h - b) / 2, 0);
+  const bottom = new THREE.BoxGeometry(w - b * 2, b, d - b * 2).translate(0, -(h - b) / 2, 0);
+  const parts = [body, top, bottom].map(normaliseAttributes);
+  const merged = mergeGeometries(parts, false);
+  for (const p of parts) p.dispose();
+  return place(merged ?? new THREE.BoxGeometry(w, h, d), t);
 }
 
 export function cyl(rTop: number, rBottom: number, h: number, seg = 12, t: Xform = {}): THREE.BufferGeometry {
@@ -139,18 +142,22 @@ export function torus(r: number, tubeR: number, radSeg = 8, tubSeg = 14, arc = M
   return place(new THREE.TorusGeometry(r, tubeR, radSeg, tubSeg, arc), t);
 }
 
-/** Flat quad facing +Z before rotation. Used for decals, signs and posters. */
+/** Flat quad facing +Z before rotation. Decals, signs, posters, fence panels. */
 export function plane(w: number, h: number, t: Xform = {}): THREE.BufferGeometry {
   return place(new THREE.PlaneGeometry(w, h), t);
 }
 
-/** Tapered box - one box scaled per-vertex along Y. Good for stocks and legs. */
+/**
+ * Tapered box: cross-section scales linearly from bottom to top.
+ * Rifle stocks, grips, dumpster bodies, planters - almost nothing manufactured is
+ * a perfect prism.
+ */
 export function taper(w: number, h: number, d: number, topScale: number, t: Xform = {}): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(w, h, d, 1, 2, 1);
   const pos = g.getAttribute('position');
   for (let i = 0; i < pos.count; i++) {
     const y = pos.getY(i);
-    const k = (y + h / 2) / h; // 0 at bottom, 1 at top
+    const k = (y + h / 2) / h; // 0 at the bottom, 1 at the top
     const s = 1 + (topScale - 1) * k;
     pos.setX(i, pos.getX(i) * s);
     pos.setZ(i, pos.getZ(i) * s);
@@ -165,7 +172,7 @@ export function taper(w: number, h: number, d: number, topScale: number, t: Xfor
 
 /**
  * Accumulates world-space geometry per material key, plus any objects that must
- * stay individually addressable because they animate.
+ * stay individually addressable because they animate or carry a unique texture.
  */
 export class GeoCollector {
   private readonly chunks = new Map<string, THREE.BufferGeometry[]>();

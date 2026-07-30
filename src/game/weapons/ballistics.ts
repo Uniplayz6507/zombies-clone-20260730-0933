@@ -1,4 +1,4 @@
-import { Rng } from '../../util/rng';
+import type { Rng } from '../../util/rng';
 import { raySlabAABB, raySphere } from '../physics/aabb';
 import type { MoveContext } from '../physics/CharacterController';
 import { damageAtRange, HIT_MULTIPLIER, type HitZone, type WeaponSpec } from '../../content/weapons.data';
@@ -11,17 +11,18 @@ import { SCORING } from '../../content/waves.data';
 /**
  * Hitscan ballistics.
  *
- * Bullets are rays, not projectiles. At pistol-to-shotgun ranges in a 50m map,
+ * Bullets are rays, not projectiles. At pistol-to-shotgun ranges inside a 55m map,
  * simulated projectiles would add per-frame integration and per-bullet state for
- * zero perceptible benefit.
+ * no perceptible benefit.
  *
  * Order of operations per pellet, and the order matters for both correctness and
  * cost:
- *   1. Find the nearest *wall* hit along the ray (slab tests, broadphase-filtered).
+ *   1. Find the nearest WALL hit along the ray (slab tests, broadphase filtered).
  *   2. Collect zombie sphere hits closer than that wall.
  *   3. Sort front-to-back, apply damage through `penetration` bodies.
- * Doing the wall test first means a shot into cover never damages the zombie
- * standing behind it, and we never pay for sorting hits that are occluded anyway.
+ *
+ * Testing the wall first means a shot into cover never damages the zombie standing
+ * behind it, and we never pay to sort hits that were occluded anyway.
  */
 
 export interface FireContext {
@@ -42,8 +43,8 @@ interface Candidate {
   z: number;
 }
 
-// Pre-allocated scratch. A shotgun blast is 9 pellets x up to 24 zombies; none
-// of this may allocate.
+// Pre-allocated scratch. A shotgun blast is 9 pellets against up to 24 zombies;
+// none of this may allocate.
 const MAX_CANDIDATES = 32;
 const candidates: Candidate[] = Array.from({ length: MAX_CANDIDATES }, () => ({
   t: 0,
@@ -53,12 +54,14 @@ const candidates: Candidate[] = Array.from({ length: MAX_CANDIDATES }, () => ({
   y: 0,
   z: 0,
 }));
-const sphere = { x: 0, y: 0, z: 0, r: 0, zone: 'torso' as HitZone };
+const probe = { x: 0, y: 0, z: 0, r: 0, zone: 'torso' as HitZone };
 const scratchIdx: number[] = [];
+const dirScratch = { x: 0, y: 0, z: 0 };
+const normal = { x: 0, y: 1, z: 0 };
 
 /**
  * Nearest static-geometry hit along a ray.
- * Returns distance, and writes the surface normal into `nrm`.
+ * Returns the distance, and writes the surface normal into `nrm`. -1 for a miss.
  */
 function wallHit(
   ox: number,
@@ -84,7 +87,7 @@ function wallHit(
     }
   }
 
-  // Ground plane. Cheap analytic test rather than a giant floor collider.
+  // Ground plane. A cheap analytic test beats a map-sized floor collider.
   if (dy < -1e-6) {
     const tGround = -oy / dy;
     if (tGround > 0 && tGround < best) {
@@ -101,7 +104,7 @@ function wallHit(
   }
   if (bestIdx < 0) return -1;
 
-  // Recover the face normal by asking which slab the hit point sits on.
+  // Recover the face normal by asking which slab the hit point landed on.
   const c = ctx.colliders[bestIdx];
   const hx = ox + dx * best;
   const hy = oy + dy * best;
@@ -119,7 +122,24 @@ function wallHit(
   return best;
 }
 
-/** Random unit-cone deviation, written into (dx, dy, dz). */
+/** Is the straight line between two points clear of static geometry? */
+function losClear(ax: number, ay: number, az: number, bx: number, by: number, bz: number, ctx: MoveContext): boolean {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const dz = bz - az;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-5) return true;
+  const scratchNormal = { x: 0, y: 0, z: 0 };
+  return wallHit(ax, ay, az, dx / len, dy / len, dz / len, len, ctx, scratchNormal) < 0;
+}
+
+/**
+ * Deviate a direction inside a cone.
+ *
+ * The basis is (right, up, forward) where up = right x forward. Building it that
+ * way rather than assuming world-up is what keeps vertical spread correct when
+ * the player is aiming steeply up or down.
+ */
 function applySpread(
   dir: { x: number; y: number; z: number },
   rightX: number,
@@ -128,20 +148,21 @@ function applySpread(
   rng: Rng,
 ): void {
   if (spreadRad <= 1e-6) return;
-  // Up = right x forward, so the basis stays orthonormal at any pitch.
-  const upX = rightZ * dir.y - 0 * dir.z;
-  const upY = 0 * dir.x - rightX * dir.y * 0 - (rightX * dir.z - rightZ * dir.x);
-  const upZ = rightX * dir.y - dir.x * 0;
-  // Normalise the computed up vector.
+
+  // right = (rightX, 0, rightZ); up = right x forward
+  const upX = -rightZ * dir.y;
+  const upY = rightZ * dir.x - rightX * dir.z;
+  const upZ = rightX * dir.y;
   const ul = Math.hypot(upX, upY, upZ) || 1;
   const ux = upX / ul;
   const uy = upY / ul;
   const uz = upZ / ul;
 
-  const a = rng.next() * Math.PI * 2;
-  const r = Math.sqrt(rng.next()) * Math.tan(spreadRad);
-  const ox = Math.cos(a) * r;
-  const oy = Math.sin(a) * r;
+  // Uniform sample over the cone's disc: sqrt(u) avoids clustering at the centre.
+  const angle = rng.next() * Math.PI * 2;
+  const radius = Math.sqrt(rng.next()) * Math.tan(spreadRad);
+  const ox = Math.cos(angle) * radius;
+  const oy = Math.sin(angle) * radius;
 
   dir.x += rightX * ox + ux * oy;
   dir.y += uy * oy;
@@ -152,12 +173,9 @@ function applySpread(
   dir.z /= l;
 }
 
-const dirScratch = { x: 0, y: 0, z: 0 };
-const normal = { x: 0, y: 1, z: 0 };
-
 /**
- * Resolve one trigger pull. Fires `spec.pellets` rays from the eye.
- * Spread is drawn from the seeded RNG so a given pattern is reproducible.
+ * Resolve one trigger pull: fires `spec.pellets` rays from the eye.
+ * Spread comes from the seeded RNG, so a given pattern is reproducible.
  */
 export function fireShot(fc: FireContext, spec: WeaponSpec, spreadRad: number): void {
   const { player, events, zombies, ctx, economy, rng } = fc;
@@ -208,18 +226,18 @@ export function fireShot(fc: FireContext, spec: WeaponSpec, spreadRad: number): 
     for (let i = 0; i < zombies.length && count < MAX_CANDIDATES; i++) {
       const z = zombies[i];
       if (!z.alive) continue;
-      // Broad reject on the bounding sphere before testing four small ones.
+      // Broad reject on one bounding sphere before testing four small ones.
       const gross = raySphere(ox, oy, oz, dx, dy, dz, z.pos.x, z.pos.y + z.height * 0.55, z.pos.z, z.height * 0.62);
       if (gross < 0 || gross > limit) continue;
 
       let bestT = Infinity;
       let bestZone: HitZone = 'torso';
       for (let s = 0; s < HIT_SPHERES.length; s++) {
-        z.sphere(s, sphere);
-        const t = raySphere(ox, oy, oz, dx, dy, dz, sphere.x, sphere.y, sphere.z, sphere.r);
+        z.sphere(s, probe);
+        const t = raySphere(ox, oy, oz, dx, dy, dz, probe.x, probe.y, probe.z, probe.r);
         if (t >= 0 && t < bestT && t <= limit) {
           bestT = t;
-          bestZone = sphere.zone;
+          bestZone = probe.zone;
         }
       }
       if (bestT === Infinity) continue;
@@ -249,7 +267,7 @@ export function fireShot(fc: FireContext, spec: WeaponSpec, spreadRad: number): 
       continue;
     }
 
-    // 3. Front to back. Insertion sort - `count` is tiny and this never allocates.
+    // 3. Front to back. Insertion sort: `count` is tiny and this never allocates.
     for (let i = 1; i < count; i++) {
       const cur = candidates[i];
       let j = i - 1;
@@ -260,7 +278,7 @@ export function fireShot(fc: FireContext, spec: WeaponSpec, spreadRad: number): 
       candidates[j + 1] = cur;
     }
 
-    const pierce = Math.min(spec.penetration, count);
+    const pierce = Math.max(1, Math.min(spec.penetration, count));
     for (let i = 0; i < pierce; i++) {
       const c = candidates[i];
       const z = c.zombie;
@@ -285,7 +303,7 @@ export function fireShot(fc: FireContext, spec: WeaponSpec, spreadRad: number): 
       }
     }
 
-    const last = candidates[Math.min(pierce, count) - 1];
+    const last = candidates[pierce - 1];
     events.push({ type: 'tracer', x0: ox, y0: oy, z0: oz, x1: last.x, y1: last.y, z1: last.z });
   }
 
@@ -296,7 +314,7 @@ export function fireShot(fc: FireContext, spec: WeaponSpec, spreadRad: number): 
 }
 
 /**
- * Melee swing: a short sphere sweep in front of the camera gated by an arc test.
+ * Melee swing: a short sphere sweep in front of the camera, gated by an arc test.
  * No animation dependency, so the hit registers the instant the timer says it
  * should - which is what makes a panic knife feel trustworthy.
  */
@@ -309,10 +327,11 @@ export function meleeSwing(fc: FireContext, spec: WeaponSpec): void {
   const fz = -Math.cos(player.yaw);
   const ox = player.pos.x;
   const oz = player.pos.z;
+  const eyeY = player.eyeY - 0.3;
 
   let hits = 0;
   let connected = false;
-  let headshot = false;
+  let killedAnything = false;
 
   for (let i = 0; i < zombies.length && hits < spec.penetration; i++) {
     const z = zombies[i];
@@ -323,16 +342,11 @@ export function meleeSwing(fc: FireContext, spec: WeaponSpec): void {
     if (d > reach + z.radius) continue;
     if (Math.abs(z.pos.y - player.pos.y) > 1.8) continue;
     if (d > 1e-4 && (dx / d) * fx + (dz / d) * fz < arc) continue;
-    // A wall between us blocks the blade, same as a bullet.
-    const cy = player.eyeY - 0.3;
-    if (!import.meta.env.PROD) {
-      // (kept as one call in both builds; the guard is only to document intent)
-    }
-    const blocked = !losOk(ox, cy, oz, z.pos.x, z.centreY, z.pos.z, ctx);
-    if (blocked) continue;
+    // A wall between us stops the blade, exactly as it would a bullet.
+    if (!losClear(ox, eyeY, oz, z.pos.x, z.centreY, z.pos.z, ctx)) continue;
 
-    // Aim for the head: the Trench Fang is a one-hit kill for many waves, and
-    // rewarding a committed swing feels better than a flat damage number.
+    // The Trench Fang aims for the head. It is a one-hit kill for many waves,
+    // and rewarding a committed swing feels better than a flat damage number.
     const zone: HitZone = 'head';
     const killed = z.hurt(spec.damage, zone, true);
     hits++;
@@ -340,27 +354,25 @@ export function meleeSwing(fc: FireContext, spec: WeaponSpec): void {
     economy.award(Math.round(SCORING.perHit * spec.hitPointFactor));
     events.push({ type: 'impactFlesh', x: z.pos.x, y: z.centreY, z: z.pos.z, dx: fx, dy: 0, dz: fz, zone });
     if (killed) {
-      headshot = true;
+      killedAnything = true;
       economy.award(SCORING.meleeKill);
       player.kills++;
       player.meleeKills++;
-      events.push({ type: 'kill', kind: z.kind, headshot: true, melee: true, x: z.pos.x, y: z.centreY, z: z.pos.z, points: SCORING.meleeKill });
+      events.push({
+        type: 'kill',
+        kind: z.kind,
+        headshot: true,
+        melee: true,
+        x: z.pos.x,
+        y: z.centreY,
+        z: z.pos.z,
+        points: SCORING.meleeKill,
+      });
     }
   }
 
   if (connected) {
     events.push({ type: 'meleeHit' });
-    events.push({ type: 'hitmarker', headshot });
+    events.push({ type: 'hitmarker', headshot: killedAnything });
   }
-}
-
-/** Thin wrapper so ballistics does not import the controller's whole surface. */
-function losOk(ax: number, ay: number, az: number, bx: number, by: number, bz: number, ctx: MoveContext): boolean {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const dz = bz - az;
-  const len = Math.hypot(dx, dy, dz);
-  if (len < 1e-5) return true;
-  const t = wallHit(ax, ay, az, dx / len, dy / len, dz / len, len, ctx, normal);
-  return t < 0;
 }
