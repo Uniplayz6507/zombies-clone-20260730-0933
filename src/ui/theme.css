@@ -1,0 +1,195 @@
+/* ---------------------------------------------------------------------------
+   Rotwave Protocol - design tokens & global reset.
+   Plain CSS only. No Tailwind, no component library, per the brief.
+   --------------------------------------------------------------------------- */
+
+:root {
+  /* Palette: cold sodium-lit street at night. */
+  --ink: #07080a;
+  --ink-2: #0d1014;
+  --ink-3: #14181e;
+  --steel: #2a3138;
+  --steel-2: #3c454e;
+  --ash: #8c959d;
+  --bone: #e6e3dc;
+  --paper: #f4f1ea;
+
+  --sodium: #ffab4d;
+  --sodium-dim: #b3703a;
+  --toxic: #9dd649;
+  --toxic-dim: #5d8a24;
+  --blood: #b4241f;
+  --blood-bright: #ff4136;
+  --ice: #7fb2d9;
+
+  --hud-bg: rgba(7, 8, 10, 0.55);
+  --hud-line: rgba(230, 227, 220, 0.18);
+
+  --font-display: 'Impact', 'Haettenschweiler', 'Franklin Gothic Bold', 'Arial Black', sans-serif;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Menlo, Consolas, monospace;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--ink);
+  color: var(--bone);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  /* No text selection or drag ghosts while playing. */
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  cursor: default;
+}
+
+#root {
+  position: relative;
+  isolation: isolate;
+}
+
+canvas {
+  display: block;
+}
+
+/* Shared: full-bleed overlay layer above the canvas. */
+.layer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+}
+
+.layer--passthrough {
+  pointer-events: none;
+}
+
+/* Shared button styling: stencilled military crate look. */
+.btn {
+  appearance: none;
+  border: 1px solid var(--steel-2);
+  background: linear-gradient(180deg, rgba(60, 69, 78, 0.55), rgba(13, 16, 20, 0.85));
+  color: var(--bone);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 13px 22px;
+  cursor: pointer;
+  position: relative;
+  transition: border-color 140ms var(--ease-out), color 140ms var(--ease-out),
+    transform 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.btn::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--steel-2);
+  transition: background 140ms var(--ease-out);
+}
+
+.btn:hover,
+.btn:focus-visible {
+  border-color: var(--sodium);
+  color: #fff;
+  outline: none;
+  transform: translateX(3px);
+}
+
+.btn:hover::before,
+.btn:focus-visible::before {
+  background: var(--sodium);
+}
+
+.btn:active {
+  transform: translateX(1px) scale(0.99);
+}
+
+.btn--primary {
+  font-size: 19px;
+  padding: 17px 26px;
+  border-color: var(--sodium-dim);
+  background: linear-gradient(180deg, rgba(179, 112, 58, 0.35), rgba(13, 16, 20, 0.9));
+}
+
+.btn--primary::before {
+  background: var(--sodium);
+  width: 4px;
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: rgba(230, 227, 220, 0.2);
+  font-size: 13px;
+  padding: 10px 16px;
+}
+
+.btn[aria-pressed='true'] {
+  border-color: var(--toxic-dim);
+  color: var(--toxic);
+}
+
+.btn[aria-pressed='true']::before {
+  background: var(--toxic);
+}
+
+/* Reusable label / kicker text. */
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--ash);
+}
+
+/* Film grain + scanline vignette used by menu and HUD. */
+.grain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  mix-blend-mode: overlay;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.035) 0px,
+    rgba(255, 255, 255, 0.035) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 50%, transparent 40%, rgba(0, 0, 0, 0.72) 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
