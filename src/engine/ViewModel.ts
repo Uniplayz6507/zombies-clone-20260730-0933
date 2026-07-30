@@ -1,372 +1,321 @@
 import * as THREE from 'three';
 import type { WeaponId } from '../types';
 import type { Arsenal } from '../game/weapons/Arsenal';
-import type { WeaponSpec } from '../content/weapons.data';
 import type { Player } from '../game/Player';
 import type { MaterialLib } from '../procgen/textures/materials';
 import type { SpriteLib } from '../procgen/textures/sprites';
 import { createWeaponModels, type WeaponModel, type WeaponModels } from '../procgen/WeaponFactory';
-import { clamp, clamp01, damp, lerp } from '../util/vec';
+import type { Fx } from './Fx';
+import { clamp01, damp, lerp } from '../util/vec';
 
 /**
- * The first-person hands.
+ * The weapon in your hands.
  *
- * The whole viewmodel rig is parented to the camera, so everything in here works
- * in camera space and needs no world transforms at all. It sits inside the
- * camera's near plane (0.05m), which is why it never clips against the world
- * geometry it is standing in front of - and why it does not need the separate
- * overlay render pass a second camera would cost.
+ * Parented directly to the camera rather than rendered in a separate overlay
+ * pass. With a 5cm near plane and the model kept inside ~0.6m, it never clips
+ * geometry unless you physically press into a wall - and a second render pass
+ * would not survive the post chain cleanly. (Known trade-off, documented in the
+ * README.)
  *
- * Nothing here affects the simulation. Every value is presentation: the weapon
- * that shoots is `Arsenal`, and it does not know this file exists. That means
- * viewmodel animation can run at render rate (smooth on a 144Hz display) while
- * the shot that actually fired was resolved at a fixed 60Hz.
+ * Lighting: the gunmetal, polymer and timber materials are weapon-exclusive, so
+ * their envMapIntensity is pushed up here. That gets a well-lit weapon out of the
+ * PMREM environment alone, without a dedicated viewmodel light adding to the
+ * global point-light count (and therefore to every material's shader cost).
+ *
+ * The muzzle flash light IS real and permanent (intensity 0 at rest) because
+ * having your shots light up the alley is worth one light slot.
  */
 
-interface Spring {
-  value: number;
-  vel: number;
-}
-
 const _v = new THREE.Vector3();
-const _e = new THREE.Euler();
-
-function spring(s: Spring, target: number, stiffness: number, damping: number, dt: number): void {
-  s.vel += (-(s.value - target) * stiffness - s.vel * damping) * dt;
-  s.value += s.vel * dt;
-}
 
 export class ViewModel {
-  readonly root = new THREE.Group();
-
+  private readonly root = new THREE.Group();
   private readonly models: WeaponModels;
-  private readonly order: WeaponId[] = ['sidewinder', 'hornet', 'breaker', 'fang'];
+  private current: WeaponId = 'sidewinder';
+  private shown: WeaponModel;
 
-  private held: WeaponId = 'sidewinder';
-  /** True while a quick-melee swing is showing the knife over the held weapon. */
-  private showingKnife = false;
-
-  // --- Animation state ---------------------------------------------------
-  private readonly kick: Spring = { value: 0, vel: 0 };
-  private readonly kickPitch: Spring = { value: 0, vel: 0 };
+  // --- Sway and bob -------------------------------------------------------
   private swayX = 0;
   private swayY = 0;
-  private lagX = 0;
-  private lagY = 0;
-  private strafeRoll = 0;
-  private bobPhase = 0;
-  private lower = 0;
-  private adsBlend = 0;
+  private bobX = 0;
+  private bobY = 0;
 
-  /** 0-1 through the current action cycle (slide / handle / pump). */
+  // --- Recoil springs -----------------------------------------------------
+  private kickZ = 0;
+  private kickVelZ = 0;
+  private kickPitch = 0;
+  private kickVelPitch = 0;
+  private kickRoll = 0;
+
+  // --- Action cycle -------------------------------------------------------
+  /** 1 -> 0 over the cycle. Drives the slide/bolt/pump travel. */
   private actionT = 0;
-  private actionDur = 0.085;
-  private magDrop = 0;
-  private meleeT = 0;
-  private meleeDur = 0.001;
+  private actionSpeed = 12;
 
-  // --- Muzzle flash ------------------------------------------------------
-  private readonly flash: THREE.Mesh;
+  // --- Muzzle flash -------------------------------------------------------
+  private readonly flashSprite: THREE.Sprite;
   private readonly flashLight: THREE.PointLight;
   private flashT = 0;
-  private flashLife = 0.055;
+  private flashRoll = 0;
 
-  constructor(lib: MaterialLib, sprites: SpriteLib) {
-    this.root.name = 'viewmodel';
+  private adsBlend = 0;
+
+  constructor(
+    camera: THREE.Camera,
+    scene: THREE.Object3D,
+    private readonly lib: MaterialLib,
+    sprites: SpriteLib,
+    private readonly fx: Fx,
+  ) {
     this.models = createWeaponModels(lib);
 
-    for (const id of this.order) {
-      const m = this.models[id];
-      m.group.visible = id === 'sidewinder';
-      // Nothing in the viewmodel is ever culled: it is always on screen, and a
-      // bounding-sphere test on 4 groups every frame is pure waste.
-      m.group.traverse((o) => {
-        o.frustumCulled = false;
-      });
-      this.root.add(m.group);
+    // Weapon-only materials, so we can crank their environment response without
+    // affecting anything in the world.
+    for (const m of [lib.gunmetal, lib.gunSteelBright, lib.gunPolymer, lib.gunWood]) {
+      m.envMapIntensity = 1.85;
     }
 
-    // Additive flash quad, re-parented to whichever muzzle is current.
-    const flashMat = new THREE.MeshBasicMaterial({
+    this.root.name = 'viewmodel';
+    // Drawn after the world so it always sits on top of transparent FX.
+    this.root.renderOrder = 10;
+    camera.add(this.root);
+
+    for (const id of Object.keys(this.models) as WeaponId[]) {
+      const model = this.models[id];
+      model.group.visible = false;
+      this.root.add(model.group);
+    }
+    this.shown = this.models.sidewinder;
+    this.shown.group.visible = true;
+
+    // Muzzle flash: an additive billboard for the shape, and a real light for
+    // the effect it has on the street.
+    const flashMat = new THREE.SpriteMaterial({
       map: sprites.muzzleFlash,
-      transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       depthTest: false,
-      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0,
     });
-    this.flash = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), flashMat);
-    this.flash.frustumCulled = false;
-    this.flash.renderOrder = 20;
-    this.flash.visible = false;
-    this.models.sidewinder.muzzle.add(this.flash);
+    this.flashSprite = new THREE.Sprite(flashMat);
+    this.flashSprite.scale.setScalar(0.001);
+    this.flashSprite.renderOrder = 12;
+    this.root.add(this.flashSprite);
 
-    /**
-     * The muzzle light is created ONCE, here, and left in the graph forever at
-     * zero intensity. Adding a light on fire and removing it after would change
-     * `numPointLights`, which is baked into every compiled material - i.e. a
-     * full shader recompile on the first shot of every burst. Same trap as
-     * LightPool, same fix: keep the count constant, animate the intensity.
-     */
-    this.flashLight = new THREE.PointLight(0xffc98a, 0, 13, 2);
+    this.flashLight = new THREE.PointLight(0xffc07a, 0, 14, 2);
     this.flashLight.castShadow = false;
-    this.root.add(this.flashLight);
+    // Parented to the scene, not the camera, so it lights the world from where
+    // the muzzle actually is.
+    scene.add(this.flashLight);
   }
 
-  /** Parent the rig to the camera. Camera must itself be in the scene. */
-  attach(camera: THREE.Camera): void {
-    camera.add(this.root);
+  /** Which model is currently drawn - the held gun, or the knife mid-swing. */
+  private resolveModel(arsenal: Arsenal): WeaponId {
+    return arsenal.meleeT > 0 ? 'fang' : arsenal.current;
   }
 
-  private model(id: WeaponId): WeaponModel {
-    return this.models[id];
+  private show(id: WeaponId): void {
+    if (id === this.current) return;
+    this.shown.group.visible = false;
+    this.current = id;
+    this.shown = this.models[id];
+    this.shown.group.visible = true;
   }
 
-  private get visibleModel(): WeaponModel {
-    return this.model(this.showingKnife ? 'fang' : this.held);
-  }
-
-  private setVisible(id: WeaponId): void {
-    for (const other of this.order) this.models[other].group.visible = other === id;
-    // Move the flash quad with the weapon so it always sits on the real muzzle.
-    const muzzle = this.models[id].muzzle;
-    if (this.flash.parent !== muzzle) muzzle.add(this.flash);
-  }
-
-  reset(held: WeaponId = 'sidewinder'): void {
-    this.held = held;
-    this.showingKnife = false;
-    this.kick.value = 0;
-    this.kick.vel = 0;
-    this.kickPitch.value = 0;
-    this.kickPitch.vel = 0;
-    this.swayX = 0;
-    this.swayY = 0;
-    this.lagX = 0;
-    this.lagY = 0;
-    this.strafeRoll = 0;
-    this.bobPhase = 0;
-    this.lower = 0;
-    this.adsBlend = 0;
-    this.actionT = 0;
-    this.magDrop = 0;
-    this.meleeT = 0;
-    this.flashT = 0;
-    this.flash.visible = false;
-    this.flashLight.intensity = 0;
-    this.setVisible(held);
-  }
-
-  // -----------------------------------------------------------------------
-  // Triggers, called from the engine's event drain
-  // -----------------------------------------------------------------------
-
-  onShot(spec: WeaponSpec): void {
-    // Recoil is a spring impulse, not a keyframed animation, so rapid fire
-    // stacks correctly instead of restarting from zero every shot.
-    this.kick.vel += spec.kick * 46;
-    this.kickPitch.vel += spec.recoilPitch * 34;
-    this.actionDur = spec.mode === 'pump' ? 0.11 : Math.max(0.045, Math.min(0.1, 30 / spec.rpm));
+  /** Called on every shot. */
+  onShot(weapon: WeaponId, recoilPitch: number, kick: number, pump: boolean): void {
+    this.kickVelZ += kick * 34;
+    this.kickVelPitch += recoilPitch * 30;
+    this.kickRoll += (Math.random() - 0.5) * kick * 3;
     this.actionT = 1;
-    this.flashT = this.flashLife;
-    this.flash.rotation.z = Math.random() * Math.PI * 2;
-    const s = 0.34 + Math.random() * 0.16 + (spec.pellets > 1 ? 0.22 : 0);
-    this.flash.scale.set(s, s, s);
-    this.flash.visible = true;
+    // A pump cycles slowly and deliberately; a slide snaps.
+    this.actionSpeed = pump ? 4.2 : 15;
+    this.flashT = 1;
+    this.flashRoll = Math.random() * Math.PI * 2;
+
+    // Eject a case, thrown along the camera's right vector.
+    const model = this.models[weapon];
+    model.ejectPort.getWorldPosition(_v);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.root.getWorldQuaternion(new THREE.Quaternion()));
+    this.fx.ejectCasing(_v.x, _v.y, _v.z, right.x, right.z);
+
+    model.muzzle.getWorldPosition(_v);
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.root.getWorldQuaternion(new THREE.Quaternion()));
+    this.fx.muzzleDebris(_v.x, _v.y, _v.z, fwd.x, fwd.y, fwd.z);
   }
 
-  onDryfire(): void {
-    this.kick.vel += 0.4;
-  }
-
+  /** Manual pump cycle at the end of a shotgun shot. */
   onPump(): void {
-    this.actionDur = 0.26;
     this.actionT = 1;
+    this.actionSpeed = 5.5;
   }
 
-  onReloadStart(duration: number): void {
-    this.magDrop = Math.max(0.001, duration);
+  /** Feed raw mouse movement in so the weapon lags behind your aim. */
+  addLook(dx: number, dy: number): void {
+    // Clamped so a fast flick does not fling the model off screen.
+    this.swayX += Math.max(-40, Math.min(40, dx)) * 0.00035;
+    this.swayY += Math.max(-40, Math.min(40, dy)) * 0.00035;
   }
 
-  onMelee(duration: number): void {
-    this.meleeDur = Math.max(0.001, duration);
-    this.meleeT = this.meleeDur;
-    this.showingKnife = true;
-    this.setVisible('fang');
-  }
-
-  onSwitch(next: WeaponId): void {
-    // Dip the model out of frame; the swap itself happens at the bottom, driven
-    // by Arsenal.current, so the visual and the simulation cannot disagree.
-    this.lower = 1;
-    void next;
-  }
-
-  /** World-space muzzle position, for FX spawning. */
-  muzzleWorld(out: THREE.Vector3): THREE.Vector3 {
-    return this.visibleModel.muzzle.getWorldPosition(out);
-  }
-
-  /** World-space camera-right vector, for casing ejection direction. */
-  ejectRight(camera: THREE.Camera, out: THREE.Vector3): THREE.Vector3 {
-    return out.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-  }
-
-  // -----------------------------------------------------------------------
-  // Per-frame update (render rate, NOT sim rate)
-  // -----------------------------------------------------------------------
-
-  update(dt: number, arsenal: Arsenal, player: Player, lookDX: number, lookDY: number): void {
-    const spec = arsenal.spec;
-
-    // --- Melee window ----------------------------------------------------
-    if (this.meleeT > 0) {
-      this.meleeT = Math.max(0, this.meleeT - dt);
-      if (this.meleeT === 0) {
-        this.showingKnife = false;
-        this.setVisible(this.held);
-      }
-    }
-
-    // --- Weapon swap: follow Arsenal, dip on change -----------------------
-    if (!this.showingKnife && arsenal.current !== this.held) {
-      this.held = arsenal.current;
-      this.setVisible(this.held);
-      this.lower = Math.max(this.lower, 0.8);
-    }
-    // Lower while switching, reloading a shotgun, or sprinting hard.
-    const wantLower = arsenal.switchT > 0 ? 1 : player.sprinting ? 0.35 : 0;
-    this.lower = damp(this.lower, wantLower, 9, dt);
-
-    // --- Springs ---------------------------------------------------------
-    spring(this.kick, 0, 210, 20, dt);
-    spring(this.kickPitch, 0, 190, 18, dt);
-
-    // --- Look lag ---------------------------------------------------------
-    // The gun trails the camera slightly. This is the single cheapest thing you
-    // can do to stop a viewmodel feeling glued to the screen.
-    this.lagX = damp(this.lagX, clamp(-lookDX * 0.0022, -0.05, 0.05), 9, dt);
-    this.lagY = damp(this.lagY, clamp(-lookDY * 0.0018, -0.04, 0.04), 9, dt);
-
-    // --- Idle sway + bob --------------------------------------------------
-    // Bob is driven by the player's distance-based phase, exactly like the
-    // camera and the footsteps, so all three stay locked together.
-    const moving = player.speed01;
-    this.bobPhase = player.bobPhase;
-    const bobAmp = moving * (player.crouching ? 0.45 : 1) * (1 - 0.75 * this.adsBlend);
-    const idle = performance.now() * 0.001;
-    this.swayX = damp(this.swayX, Math.sin(this.bobPhase) * 0.012 * bobAmp + Math.sin(idle * 0.7) * 0.0035, 12, dt);
-    this.swayY = damp(this.swayY, Math.abs(Math.cos(this.bobPhase)) * 0.014 * bobAmp + Math.sin(idle * 0.53) * 0.003, 12, dt);
-    this.strafeRoll = damp(this.strafeRoll, clamp(-player.vel.x * 0.004 + player.vel.z * 0.001, -0.05, 0.05), 8, dt);
-
-    // --- ADS --------------------------------------------------------------
+  update(dt: number, player: Player, arsenal: Arsenal): void {
+    this.show(this.resolveModel(arsenal));
+    const model = this.shown;
     this.adsBlend = arsenal.ads;
 
-    // --- Action cycle (slide / charging handle / pump) --------------------
-    const m = this.visibleModel;
-    if (this.actionT > 0) {
-      this.actionT = Math.max(0, this.actionT - dt / this.actionDur);
-      if (m.action) {
-        // Triangle profile: snap rearward, return a little slower.
-        const t = this.actionT;
-        const travel = t > 0.5 ? (1 - t) * 2 : t * 2;
-        m.action.position.z = m.actionTravel * travel;
-      }
-    } else if (m.action && m.action.position.z !== 0) {
-      m.action.position.z = 0;
-    }
+    // --- Springs ----------------------------------------------------------
+    const stiff = 160;
+    const damping = 19;
+    this.kickVelZ += (-this.kickZ * stiff - this.kickVelZ * damping) * dt;
+    this.kickZ += this.kickVelZ * dt;
+    this.kickVelPitch += (-this.kickPitch * stiff - this.kickVelPitch * damping) * dt;
+    this.kickPitch += this.kickVelPitch * dt;
+    this.kickRoll = damp(this.kickRoll, 0, 8, dt);
 
-    // --- Reload: drop and reseat the magazine ----------------------------
-    if (m.magazine) {
-      let drop = 0;
-      let tilt = 0;
-      if (arsenal.reloading) {
-        const p = arsenal.reloadProgress;
-        // Out fast, hold, back in at the end.
-        drop = p < 0.45 ? p / 0.45 : p < 0.72 ? 1 : 1 - (p - 0.72) / 0.28;
-        tilt = drop * 0.5;
-      }
-      m.magazine.position.y = -0.13 * drop;
-      m.magazine.rotation.x = tilt * 0.6;
-    }
+    // --- Sway decays back to centre ---------------------------------------
+    this.swayX = damp(this.swayX, 0, 7, dt);
+    this.swayY = damp(this.swayY, 0, 7, dt);
 
-    // --- Compose the final transform --------------------------------------
-    const restP = m.restPosition;
-    const adsP = m.adsPosition;
+    // --- Bob, from the player's travelled distance ------------------------
+    const bobAmount = player.speed01 * (1 - 0.75 * this.adsBlend) * (player.crouching ? 0.5 : 1);
+    this.bobX = damp(this.bobX, Math.sin(player.bobPhase) * 0.022 * bobAmount, 11, dt);
+    this.bobY = damp(this.bobY, Math.abs(Math.cos(player.bobPhase)) * 0.018 * bobAmount, 11, dt);
+
+    // --- Base pose: rest -> ADS -------------------------------------------
     const a = this.adsBlend;
+    let px = lerp(model.restPosition.x, model.adsPosition.x, a);
+    let py = lerp(model.restPosition.y, model.adsPosition.y, a);
+    let pz = lerp(model.restPosition.z, model.adsPosition.z, a);
+    let rx = lerp(model.restRotation.x, model.adsRotation.x, a);
+    let ry = lerp(model.restRotation.y, model.adsRotation.y, a);
+    let rz = lerp(model.restRotation.z, model.adsRotation.z, a);
 
-    // Reload also drags the whole weapon down and inward.
-    const reloadDip = arsenal.reloading ? Math.sin(arsenal.reloadProgress * Math.PI) : 0;
-
-    // Melee: a committed arc across the screen. Wind up, strike, recover.
-    let meleeX = 0;
-    let meleeY = 0;
-    let meleeZ = 0;
-    let meleeYaw = 0;
-    let meleePitch = 0;
-    let meleeRoll = 0;
-    if (this.meleeT > 0) {
-      const p = 1 - this.meleeT / this.meleeDur; // 0 -> 1
-      const windup = clamp01(p / 0.32);
-      const strike = clamp01((p - 0.32) / 0.3);
-      const recover = clamp01((p - 0.62) / 0.38);
-      const swing = windup - strike * 1.9 + recover * 0.9;
-      meleeX = swing * 0.34;
-      meleeY = -0.06 + windup * 0.1 - strike * 0.14;
-      meleeZ = 0.1 - strike * 0.26 + recover * 0.16;
-      meleeYaw = swing * 1.15;
-      meleePitch = windup * 0.35 - strike * 0.55;
-      meleeRoll = -swing * 0.8;
+    // --- Reload: tip the weapon down and out of the sight line ------------
+    if (arsenal.reloadT > 0 && arsenal.meleeT <= 0) {
+      const p = arsenal.reloadProgress;
+      // Down fast, hold, back up fast. sin gives that shape for free.
+      const swing = Math.sin(clamp01(p) * Math.PI);
+      py -= swing * 0.14;
+      px += swing * 0.05;
+      rx += swing * 0.75;
+      rz -= swing * 0.35;
+      if (model.magazine) {
+        // Magazine drops out in the first third, new one seats in the last.
+        const drop = p < 0.42 ? p / 0.42 : p > 0.66 ? 1 - (p - 0.66) / 0.34 : 1;
+        model.magazine.position.y = -drop * 0.22;
+        model.magazine.position.z = drop * 0.03;
+      }
+    } else if (model.magazine) {
+      model.magazine.position.set(0, 0, 0);
     }
 
-    this.root.position.set(0, 0, 0);
+    // --- Weapon swap: dip out of frame and back ---------------------------
+    if (arsenal.switchT > 0) {
+      const t = 1 - Math.abs(arsenal.switchT / 0.42 - 0.5) * 2; // 0 -> 1 -> 0
+      py -= t * 0.3;
+      rx += t * 1.1;
+    }
 
-    const px = lerp(restP.x, adsP.x, a) + this.swayX + this.lagX + meleeX;
-    const py = lerp(restP.y, adsP.y, a) + this.swayY + this.lagY - this.lower * 0.34 - reloadDip * 0.05 + meleeY;
-    const pz = lerp(restP.z, adsP.z, a) + this.kick.value + meleeZ;
+    // --- Melee swing ------------------------------------------------------
+    if (arsenal.meleeT > 0) {
+      const total = 60 / 96; // Trench Fang cycle, matches the weapon spec
+      const p = clamp01(1 - arsenal.meleeT / total);
+      // Wind back, then slash left-to-right across the screen.
+      const windup = clamp01(p / 0.35);
+      const slash = clamp01((p - 0.35) / 0.4);
+      const recover = clamp01((p - 0.75) / 0.25);
+      px += lerp(0.1, -0.34, slash) * (1 - recover) + windup * 0.06;
+      py += lerp(-0.04, 0.1, slash) * (1 - recover);
+      pz += lerp(0.05, -0.24, slash) * (1 - recover);
+      ry += lerp(0.5, -0.9, slash) * (1 - recover);
+      rz += lerp(0.6, -1.5, slash) * (1 - recover);
+      rx += windup * 0.4 - slash * 0.5;
+    }
 
-    m.group.position.set(px, py, pz);
-
-    const rr = m.restRotation;
-    const ar = m.adsRotation;
-    _e.set(
-      lerp(rr.x, ar.x, a) + this.kickPitch.value + this.lagY * 1.6 - this.lower * 0.5 - reloadDip * 0.28 + meleePitch,
-      lerp(rr.y, ar.y, a) + this.lagX * 2.2 + meleeYaw,
-      lerp(rr.z, ar.z, a) + this.strafeRoll + this.lower * 0.22 + reloadDip * 0.2 + meleeRoll,
+    // --- Compose ----------------------------------------------------------
+    this.root.position.set(
+      px + this.swayX + this.bobX,
+      py + this.swayY + this.bobY - player.landImpact * 0.05,
+      pz + this.kickZ,
     );
-    m.group.rotation.copy(_e);
+    this.root.rotation.set(
+      rx + this.kickPitch - this.swayY * 1.6,
+      ry - this.swayX * 1.9,
+      rz + this.kickRoll * 0.4 + this.swayX * 0.9,
+    );
 
-    // --- Muzzle flash decay -----------------------------------------------
-    if (this.flashT > 0) {
-      this.flashT = Math.max(0, this.flashT - dt);
-      const k = this.flashT / this.flashLife;
-      const mat = this.flash.material as THREE.MeshBasicMaterial;
-      mat.opacity = k;
-      this.flash.visible = k > 0.02;
-      // The flash is a real light source for a few milliseconds. On a dark map
-      // this does more for the feel of shooting than the sprite does.
-      m.muzzle.getWorldPosition(_v);
-      this.root.worldToLocal(_v);
-      this.flashLight.position.copy(_v);
-      this.flashLight.intensity = k * k * (spec.pellets > 1 ? 26 : 15);
-    } else if (this.flashLight.intensity !== 0) {
-      this.flashLight.intensity = 0;
-      this.flash.visible = false;
+    // --- Action travel ----------------------------------------------------
+    if (model.action) {
+      this.actionT = Math.max(0, this.actionT - dt * this.actionSpeed);
+      // Rearward snap with a softer return, which is what a real cycle looks like.
+      const travel = Math.sin(clamp01(this.actionT) * Math.PI * 0.5) * model.actionTravel;
+      model.action.position.z = travel;
     }
+
+    // --- Muzzle flash -----------------------------------------------------
+    this.flashT = Math.max(0, this.flashT - dt * 22);
+    const flashMat = this.flashSprite.material as THREE.SpriteMaterial;
+    if (this.flashT > 0.01) {
+      model.muzzle.getWorldPosition(_v);
+      this.flashLight.position.copy(_v);
+      // Flicker the intensity so two consecutive shots never look identical.
+      this.flashLight.intensity = this.flashT * this.flashT * 190 * (0.75 + Math.random() * 0.5);
+
+      this.flashSprite.position.copy(model.muzzle.position);
+      const scale = 0.24 + (1 - this.flashT) * 0.1;
+      this.flashSprite.scale.setScalar(scale * (0.8 + Math.random() * 0.4));
+      this.flashSprite.material.rotation = this.flashRoll;
+      flashMat.opacity = this.flashT;
+      this.flashSprite.visible = true;
+    } else {
+      this.flashLight.intensity = 0;
+      this.flashSprite.visible = false;
+      flashMat.opacity = 0;
+    }
+  }
+
+  /** Hide everything (menu, game over). */
+  setVisible(v: boolean): void {
+    this.root.visible = v;
+    if (!v) {
+      this.flashLight.intensity = 0;
+      this.flashSprite.visible = false;
+    }
+  }
+
+  reset(): void {
+    this.swayX = 0;
+    this.swayY = 0;
+    this.bobX = 0;
+    this.bobY = 0;
+    this.kickZ = 0;
+    this.kickVelZ = 0;
+    this.kickPitch = 0;
+    this.kickVelPitch = 0;
+    this.kickRoll = 0;
+    this.actionT = 0;
+    this.flashT = 0;
+    this.show('sidewinder');
+  }
+
+  /** Every mesh in every viewmodel, for the shader warm-up pass. */
+  allObjects(): THREE.Object3D[] {
+    return Object.values(this.models).map((m) => m.group);
   }
 
   dispose(): void {
-    for (const id of this.order) {
-      const m = this.models[id];
-      m.group.traverse((o) => {
+    for (const model of Object.values(this.models)) {
+      model.group.traverse((o) => {
         const mesh = o as THREE.Mesh;
-        if (mesh.isMesh) mesh.geometry.dispose();
+        if (mesh.geometry) mesh.geometry.dispose();
       });
-      m.group.removeFromParent();
+      model.group.removeFromParent();
     }
-    this.flash.geometry.dispose();
-    (this.flash.material as THREE.Material).dispose();
+    (this.flashSprite.material as THREE.Material).dispose();
+    this.flashSprite.removeFromParent();
+    this.flashLight.removeFromParent();
     this.flashLight.dispose();
     this.root.removeFromParent();
+    void this.lib;
   }
 }
