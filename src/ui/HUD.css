@@ -1,0 +1,494 @@
+/* ---------------------------------------------------------------------------
+   HUD - 2D overlay, plain CSS, pointer-events off.
+   Every element is positioned so the centre of the screen stays clear.
+   --------------------------------------------------------------------------- */
+
+.hud {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  font-family: var(--font-ui);
+  overflow: hidden;
+}
+
+/* --- Crosshair ----------------------------------------------------------- */
+
+.hud__cross {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  transform: translate(-50%, -50%);
+}
+
+.hud__cross span {
+  position: absolute;
+  background: rgba(236, 233, 226, 0.85);
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  transition: transform 90ms var(--ease-out);
+}
+
+.hud__cross span:nth-child(1),
+.hud__cross span:nth-child(2) {
+  width: 2px;
+  height: 7px;
+  left: 12px;
+}
+.hud__cross span:nth-child(1) {
+  top: 0;
+}
+.hud__cross span:nth-child(2) {
+  bottom: 0;
+}
+.hud__cross span:nth-child(3),
+.hud__cross span:nth-child(4) {
+  height: 2px;
+  width: 7px;
+  top: 12px;
+}
+.hud__cross span:nth-child(3) {
+  left: 0;
+}
+.hud__cross span:nth-child(4) {
+  right: 0;
+}
+
+.hud__dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 2px;
+  background: var(--sodium);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 4px var(--sodium);
+}
+
+/* --- Hitmarker ----------------------------------------------------------- */
+
+.hud__hit {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  animation: hitpop 260ms var(--ease-out) forwards;
+}
+
+.hud__hit i {
+  position: absolute;
+  background: var(--paper);
+  width: 2px;
+  height: 9px;
+}
+.hud__hit i:nth-child(1) {
+  left: 14px;
+  top: -2px;
+}
+.hud__hit i:nth-child(2) {
+  left: 14px;
+  bottom: -2px;
+}
+.hud__hit i:nth-child(3) {
+  top: 14px;
+  left: -2px;
+  width: 9px;
+  height: 2px;
+}
+.hud__hit i:nth-child(4) {
+  top: 14px;
+  right: -2px;
+  width: 9px;
+  height: 2px;
+}
+
+.hud__hit--head i {
+  background: var(--blood-bright);
+  box-shadow: 0 0 8px var(--blood-bright);
+  height: 12px;
+}
+
+@keyframes hitpop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) rotate(45deg) scale(0.5);
+  }
+  25% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(45deg) scale(1.15);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) rotate(45deg) scale(1.5);
+  }
+}
+
+/* --- Corner blocks ------------------------------------------------------- */
+
+.hud__corner {
+  position: absolute;
+  padding: 16px 20px;
+}
+.hud__corner--tl {
+  top: 0;
+  left: 0;
+}
+.hud__corner--tr {
+  top: 0;
+  right: 0;
+  text-align: right;
+}
+.hud__corner--bl {
+  bottom: 0;
+  left: 0;
+}
+.hud__corner--br {
+  bottom: 0;
+  right: 0;
+  text-align: right;
+}
+
+.hud__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: rgba(230, 227, 220, 0.5);
+  margin: 0 0 3px;
+}
+
+.hud__big {
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 0.9;
+  letter-spacing: 0.02em;
+  margin: 0;
+  color: var(--paper);
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.85);
+}
+
+.hud__big--points {
+  color: var(--sodium);
+  text-shadow: 0 0 22px rgba(255, 171, 77, 0.35);
+}
+
+.hud__sub {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: rgba(230, 227, 220, 0.68);
+  margin: 4px 0 0;
+}
+
+/* --- Health -------------------------------------------------------------- */
+
+.hud__health {
+  width: 236px;
+}
+
+.hud__bar {
+  position: relative;
+  height: 9px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--hud-line);
+  overflow: hidden;
+}
+
+.hud__bar i {
+  position: absolute;
+  inset: 1px auto 1px 1px;
+  background: linear-gradient(90deg, #7fce4a, #b6d94a);
+  transition: width 180ms var(--ease-out), background 300ms linear;
+}
+
+.hud__bar--warn i {
+  background: linear-gradient(90deg, #d69a2c, #e0c14a);
+}
+
+.hud__bar--crit i {
+  background: linear-gradient(90deg, #a81d18, #e04a3a);
+  animation: critpulse 700ms ease-in-out infinite alternate;
+}
+
+@keyframes critpulse {
+  from {
+    opacity: 0.55;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.hud__stamina {
+  margin-top: 4px;
+  height: 3px;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.hud__stamina i {
+  display: block;
+  height: 100%;
+  background: rgba(127, 178, 217, 0.75);
+  transition: width 120ms linear;
+}
+
+/* --- Ammo ---------------------------------------------------------------- */
+
+.hud__ammo {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.hud__ammo b {
+  font-family: var(--font-display);
+  font-size: 46px;
+  line-height: 0.85;
+  color: var(--paper);
+}
+
+.hud__ammo s {
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 17px;
+  color: rgba(230, 227, 220, 0.55);
+}
+
+.hud__ammo--low b {
+  color: var(--blood-bright);
+  animation: critpulse 500ms ease-in-out infinite alternate;
+}
+
+.hud__weapon {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(230, 227, 220, 0.8);
+  margin: 0 0 2px;
+}
+
+.hud__weapon em {
+  font-style: normal;
+  color: var(--ice);
+}
+
+.hud__reloading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--sodium);
+  animation: critpulse 420ms ease-in-out infinite alternate;
+}
+
+/* --- Prompt -------------------------------------------------------------- */
+
+.hud__prompt {
+  position: absolute;
+  left: 50%;
+  top: 60%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: var(--hud-bg);
+  border: 1px solid var(--hud-line);
+  border-left: 3px solid var(--sodium);
+  backdrop-filter: blur(3px);
+  white-space: nowrap;
+  animation: promptin 140ms var(--ease-out);
+}
+
+.hud__prompt--poor {
+  border-left-color: var(--blood);
+  opacity: 0.72;
+}
+
+.hud__prompt kbd {
+  background: rgba(255, 171, 77, 0.16);
+  border-color: var(--sodium-dim);
+  color: var(--sodium);
+}
+
+.hud__prompt span {
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.hud__prompt b {
+  font-family: var(--font-mono);
+  color: var(--sodium);
+}
+
+.hud__prompt--poor b {
+  color: var(--blood-bright);
+}
+
+@keyframes promptin {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* --- Banner -------------------------------------------------------------- */
+
+.hud__banner {
+  position: absolute;
+  left: 50%;
+  top: 15%;
+  transform: translateX(-50%);
+  text-align: center;
+  animation: bannerin 2600ms var(--ease-out) forwards;
+}
+
+.hud__banner h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(34px, 5vw, 60px);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--paper);
+  text-shadow: 0 0 30px rgba(0, 0, 0, 0.9);
+}
+
+.hud__banner p {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--sodium);
+}
+
+@keyframes bannerin {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.94);
+    filter: blur(6px);
+  }
+  12% {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+    filter: blur(0);
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-50%) scale(1.03);
+  }
+}
+
+/* --- Toast --------------------------------------------------------------- */
+
+.hud__toast {
+  position: absolute;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  padding: 9px 16px;
+  background: var(--hud-bg);
+  border-left: 3px solid var(--toxic);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--paper);
+  white-space: nowrap;
+  animation: toastin 2200ms var(--ease-out) forwards;
+}
+
+@keyframes toastin {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px);
+  }
+  10%,
+  70% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-6px);
+  }
+}
+
+/* --- Damage flash -------------------------------------------------------- */
+
+.hud__damage {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 140px 40px rgba(180, 36, 31, 0.75);
+  animation: dmg 420ms ease-out forwards;
+}
+
+@keyframes dmg {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* --- Intermission clock -------------------------------------------------- */
+
+.hud__clock {
+  position: absolute;
+  left: 50%;
+  top: 8%;
+  transform: translateX(-50%);
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(230, 227, 220, 0.7);
+}
+
+.hud__clock b {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 30px;
+  letter-spacing: 0;
+  color: var(--sodium);
+}
+
+/* --- Perf overlay -------------------------------------------------------- */
+
+.perf {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  padding: 8px 12px;
+  background: rgba(4, 5, 7, 0.78);
+  border: 1px solid var(--hud-line);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--toxic);
+  pointer-events: none;
+  white-space: pre;
+}
+
+.perf b {
+  color: var(--paper);
+}
+
+.perf--bad {
+  color: var(--blood-bright);
+}
