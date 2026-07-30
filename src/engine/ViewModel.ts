@@ -295,7 +295,12 @@ export class ViewModel {
     this.kickRoll = 0;
     this.actionT = 0;
     this.flashT = 0;
-    this.show('sidewinder');
+    // Warm-up hides every weapon model after shader compilation. Do not rely on
+    // show('sidewinder') to make it visible when the selected id is unchanged.
+    for (const model of Object.values(this.models)) model.group.visible = false;
+    this.current = 'sidewinder';
+    this.shown = this.models.sidewinder;
+    this.shown.group.visible = true;
   }
 
   /** Every mesh in every viewmodel, for the shader warm-up pass. */
